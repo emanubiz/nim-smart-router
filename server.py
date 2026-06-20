@@ -37,14 +37,17 @@ router: Optional[Router] = None
 # === MODEL CONFIG ===
 
 # Priority-ordered list: trial order on fallback
+# Ranking based on public benchmarks (SWE-Bench Pro/Verified, LiveCodeBench, GPQA — June 2026)
 MODEL_PRIORITY = [
-    "kimi-k2.6",                # TIER 1 - Best
-    "deepseek-v4-pro",          # TIER 1 - Best
-    "deepseek-v4-flash",        # TIER 2 - Fast
-    "minimax-m3",               # TIER 2 - Mid
-    "glm-5.1",                  # TIER 2 - Mid
-    "step-3.5-flash",           # TIER 3 - Fallback
-    "step-3.7-flash",           # TIER 3 - Fallback
+    "kimi-k2.6",                # TIER 1 - Frontier: SWE-Bench Verified 80.2%, strong agentic
+    "deepseek-v4-pro",          # TIER 1 - Frontier: LiveCodeBench 93.5, SWE-Bench Verified 80.6%
+    "minimax-m3",               # TIER 1 - Frontier: SWE-Bench Pro 59.0% (best open), GPQA 92.7%
+    "qwen3-coder-480b",         # TIER 2 - Coder: 480B MoE specialist, Claude Sonnet-level coding
+    "qwen3-235b",               # TIER 2 - Strong: 235B MoE, top reasoning & multilingual
+    "deepseek-v4-flash",        # TIER 2 - Fast V4 variant, still frontier quality
+    "glm-5.1",                  # TIER 3 - Mid: Zhipu AI
+    "step-3.7-flash",           # TIER 3 - SWE-Bench Pro 56.3%, ClawEval-1.1 #1
+    "step-3.5-flash",           # TIER 3 - SWE-Bench Pro 51.3%, fast/cheap
     "llama-nemotron-super-49b", # Backup
     "llama-3.1-70b",            # Backup
 ]
@@ -73,15 +76,17 @@ def load_env_file():
 def build_model_list(api_key: str) -> list:
     """Build model list for LiteLLM Router"""
     return [
-        {"model_name": "kimi-k2.6",               "litellm_params": {"model": "nvidia_nim/moonshotai/kimi-k2.6",             "api_key": api_key}},
-        {"model_name": "deepseek-v4-pro",          "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-pro",      "api_key": api_key}},
-        {"model_name": "deepseek-v4-flash",        "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-flash",    "api_key": api_key}},
-        {"model_name": "minimax-m3",               "litellm_params": {"model": "nvidia_nim/minimaxai/minimax-m3",             "api_key": api_key}},
-        {"model_name": "glm-5.1",                  "litellm_params": {"model": "nvidia_nim/z-ai/glm-5.1",                    "api_key": api_key}},
-        {"model_name": "step-3.5-flash",           "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.5-flash",        "api_key": api_key}},
-        {"model_name": "step-3.7-flash",           "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.7-flash",        "api_key": api_key}},
-        {"model_name": "llama-nemotron-super-49b", "litellm_params": {"model": "nvidia_nim/nvidia/llama-3.3-nemotron-super-49b-v1", "api_key": api_key}},
-        {"model_name": "llama-3.1-70b",            "litellm_params": {"model": "nvidia_nim/meta/llama-3.1-70b-instruct",     "api_key": api_key}},
+        {"model_name": "kimi-k2.6",                "litellm_params": {"model": "nvidia_nim/moonshotai/kimi-k2.6",                        "api_key": api_key}},
+        {"model_name": "deepseek-v4-pro",           "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-pro",                 "api_key": api_key}},
+        {"model_name": "minimax-m3",                "litellm_params": {"model": "nvidia_nim/minimaxai/minimax-m3",                        "api_key": api_key}},
+        {"model_name": "qwen3-coder-480b",          "litellm_params": {"model": "nvidia_nim/qwen/qwen3-coder-480b-a35b-instruct",         "api_key": api_key}},
+        {"model_name": "qwen3-235b",                "litellm_params": {"model": "nvidia_nim/qwen/qwen3-235b-a22b",                        "api_key": api_key}},
+        {"model_name": "deepseek-v4-flash",         "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-flash",               "api_key": api_key}},
+        {"model_name": "glm-5.1",                   "litellm_params": {"model": "nvidia_nim/z-ai/glm-5.1",                               "api_key": api_key}},
+        {"model_name": "step-3.7-flash",            "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.7-flash",                   "api_key": api_key}},
+        {"model_name": "step-3.5-flash",            "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.5-flash",                   "api_key": api_key}},
+        {"model_name": "llama-nemotron-super-49b",  "litellm_params": {"model": "nvidia_nim/nvidia/llama-3.3-nemotron-super-49b-v1",      "api_key": api_key}},
+        {"model_name": "llama-3.1-70b",             "litellm_params": {"model": "nvidia_nim/meta/llama-3.1-70b-instruct",                 "api_key": api_key}},
     ]
 
 
@@ -97,7 +102,7 @@ def create_router() -> Router:
         cooldown_time=30,
         allowed_fails=3,
         retry_after=2,
-        max_fallbacks=5,
+        max_fallbacks=8,
         timeout=60,                # avoid hanging forever on a stuck upstream
         enable_pre_call_checks=True,
         routing_strategy="simple-shuffle",
