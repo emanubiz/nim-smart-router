@@ -9,9 +9,10 @@ echo   Coding-agent ready  ^|  model: "auto"  ^|  localhost:4000
 echo ================================================================
 echo.
 echo  Models (by priority):
-echo   1. kimi-k2.6       2. deepseek-v4-pro     3. deepseek-v4-flash
-echo   4. minimax-m3      5. glm-5.1             6. step-3.5-flash
-echo   7. step-3.7-flash  8. nemotron-super-49b  9. llama-3.1-70b
+echo   1. kimi-k2.6          2. deepseek-v4-pro      3. minimax-m3
+echo   4. qwen3-coder-480b   5. qwen3-235b           6. deepseek-v4-flash
+echo   7. glm-5.1            8. step-3.7-flash       9. step-3.5-flash
+echo  10. nemotron-super-49b 11. llama-3.1-70b
 echo.
 
 REM Load .env (skip comment lines starting with #)
