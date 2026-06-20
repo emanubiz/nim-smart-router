@@ -36,21 +36,23 @@ r = client.chat.completions.create(model="auto", messages=[{"role":"user","conte
 
 ## Models (in order of priority)
 
-| # | Name | Tier |
-|---|------|------|
-| 1 | kimi-k2.6 | 🥇 TOP |
-| 2 | deepseek-v4-pro | 🥇 TOP |
-| 3 | deepseek-v4-flash | 🥈 MID |
-| 4 | minimax-m3 | 🥈 MID |
-| 5 | glm-5.1 | 🥈 MID |
-| 6 | step-3.5-flash | 🥉 LOW |
-| 7 | step-3.7-flash | 🥉 LOW |
-| 8 | llama-nemotron-super-49b | 🔄 BACKUP |
-| 9 | llama-3.1-70b | 🔄 BACKUP |
+| # | Name | Tier | Key benchmark (June 2026) |
+|---|------|------|--------------------------|
+| 1 | kimi-k2.6 | 🥇 TIER 1 | SWE-Bench Verified 80.2%, strong agentic |
+| 2 | deepseek-v4-pro | 🥇 TIER 1 | LiveCodeBench 93.5, SWE-Bench Verified 80.6% |
+| 3 | minimax-m3 | 🥇 TIER 1 | SWE-Bench Pro 59.0% (best open-weight), GPQA 92.7% |
+| 4 | qwen3-coder-480b | 🥈 TIER 2 | 480B MoE coder, Claude Sonnet-level on agentic coding |
+| 5 | qwen3-235b | 🥈 TIER 2 | 235B MoE, top reasoning & multilingual |
+| 6 | deepseek-v4-flash | 🥈 TIER 2 | Fast V4 variant, still frontier quality |
+| 7 | glm-5.1 | 🥉 TIER 3 | Zhipu AI mid-tier |
+| 8 | step-3.7-flash | 🥉 TIER 3 | SWE-Bench Pro 56.3%, ClawEval-1.1 #1 |
+| 9 | step-3.5-flash | 🥉 TIER 3 | SWE-Bench Pro 51.3%, fast/cheap |
+| 10 | llama-nemotron-super-49b | 🔄 BACKUP | |
+| 11 | llama-3.1-70b | 🔄 BACKUP | |
 
 Use `model="auto"`, `model="best-available"`, or `model="best"` for automatic
 selection — all three map to the top-priority model. You can also request any
-model by name (e.g. `model="glm-5.1"`); fallback still applies from that point
+model by name (e.g. `model="qwen3-coder-480b"`); fallback still applies from that point
 down the chain.
 
 ## Endpoints
@@ -64,7 +66,7 @@ down the chain.
 
 ## Fallback
 
-Calling `model="kimi-k2.6"` but it returns 429? The router transparently tries deepseek-v4-pro → deepseek-v4-flash → minimax-m3 → glm-5.1 → step-3.5-flash → step-3.7-flash → nemotron → llama-70b. Your agent gets one response, no errors.
+Calling `model="kimi-k2.6"` but it returns 429? The router transparently tries deepseek-v4-pro → minimax-m3 → qwen3-coder-480b → qwen3-235b → deepseek-v4-flash → glm-5.1 → step-3.7-flash → step-3.5-flash → nemotron → llama-70b. Your agent gets one response, no errors.
 
 ## Features
 
