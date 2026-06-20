@@ -11,7 +11,7 @@ OpenAI-compatible → works with Claude Code, Cursor, Windsurf, Pi, any coding a
 ```bash
 cp .env.example .env          # paste your NVIDIA_NIM_API_KEY
 pip install -r requirements.txt
-python server.py               # → http://127.0.0.1:4000
+chmod +x start.sh && ./start.sh   # → http://127.0.0.1:4000
 ```
 
 **Windows**
@@ -89,6 +89,7 @@ Calling `model="kimi-k2.6"` but it returns 429? The router transparently tries d
 ```
 nim-smart-router/
 ├── server.py           # one file, zero bloat
+├── start.sh            # Linux/macOS launcher (loads .env, runs server)
 ├── start.bat           # Windows launcher (loads .env, runs server)
 ├── requirements.txt    # 3 dependencies
 ├── .env.example        # API key template
