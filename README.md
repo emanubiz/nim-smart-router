@@ -36,24 +36,30 @@ r = client.chat.completions.create(model="auto", messages=[{"role":"user","conte
 
 ## Models (in order of priority)
 
-| # | Name | Tier | Key benchmark (June 2026) |
-|---|------|------|--------------------------|
-| 1 | kimi-k2.6 | 🥇 TIER 1 | SWE-Bench Verified 80.2%, strong agentic |
-| 2 | deepseek-v4-pro | 🥇 TIER 1 | LiveCodeBench 93.5, SWE-Bench Verified 80.6% |
-| 3 | minimax-m3 | 🥇 TIER 1 | SWE-Bench Pro 59.0% (best open-weight), GPQA 92.7% |
-| 4 | qwen3-coder-480b | 🥈 TIER 2 | 480B MoE coder, Claude Sonnet-level on agentic coding |
-| 5 | qwen3-235b | 🥈 TIER 2 | 235B MoE, top reasoning & multilingual |
-| 6 | deepseek-v4-flash | 🥈 TIER 2 | Fast V4 variant, still frontier quality |
-| 7 | glm-5.1 | 🥉 TIER 3 | Zhipu AI mid-tier |
-| 8 | step-3.7-flash | 🥉 TIER 3 | SWE-Bench Pro 56.3%, ClawEval-1.1 #1 |
-| 9 | step-3.5-flash | 🥉 TIER 3 | SWE-Bench Pro 51.3%, fast/cheap |
-| 10 | llama-nemotron-super-49b | 🔄 BACKUP | |
-| 11 | llama-3.1-70b | 🔄 BACKUP | |
+| # | Name | Tier | SWE-Bench | GPQA | LiveCodeBench |
+|---|------|------|-----------|------|---------------|
+| 1 | minimax-m3 | 🥇 TIER 1 | 59.0% Pro | 92.7% | — |
+| 2 | deepseek-v4-pro | 🥇 TIER 1 | 80.6% Verif. | — | 93.5 |
+| 3 | kimi-k2.6 | 🥇 TIER 1 | 80.2% Verif. | 90.5% | — |
+| 4 | nemotron-3-ultra-550b | 🥇 TIER 1 | ~67% Verif. | 87.0% | 89.0% |
+| 5 | qwen3.5-397b | 🥈 TIER 2 | 76.4% Verif. | 88.4% | 83.6% |
+| 6 | nemotron-3-super-120b | 🥈 TIER 2 | ~60% Verif. | 82.7% | 81.2% |
+| 7 | qwen3-coder-480b | 🥈 TIER 2 | — | — | — |
+| 8 | qwen3-235b | 🥈 TIER 2 | — | — | — |
+| 9 | deepseek-v4-flash | 🥉 TIER 3 | — | — | — |
+| 10 | glm-5.1 | 🥉 TIER 3 | — | — | — |
+| 11 | step-3.7-flash | 🥉 TIER 3 | 56.3% Pro | — | — |
+| 12 | step-3.5-flash | 🥉 TIER 3 | 51.3% Pro | — | — |
+| 13 | llama-nemotron-super-49b | 🔄 BACKUP | — | — | — |
+| 14 | llama-3.1-70b | 🔄 BACKUP | — | — | — |
+
+> **Why no Mistral Large 3 675B?** Its GPQA Diamond is only **43.9%** —
+> worse than most 7B models. Not worth the slot.
 
 Use `model="auto"`, `model="best-available"`, or `model="best"` for automatic
-selection — all three map to the top-priority model. You can also request any
-model by name (e.g. `model="qwen3-coder-480b"`); fallback still applies from that point
-down the chain.
+selection. With **sticky routing**, if a top-4 model (minimax-m3, deepseek-v4-pro,
+kimi-k2.6, nemotron-3-ultra-550b) responded successfully last time, the next
+"auto" request starts from that model instead of always falling back to #1.
 
 ## Endpoints
 
@@ -66,18 +72,27 @@ down the chain.
 
 ## Fallback
 
-Calling `model="kimi-k2.6"` but it returns 429? The router transparently tries deepseek-v4-pro → minimax-m3 → qwen3-coder-480b → qwen3-235b → deepseek-v4-flash → glm-5.1 → step-3.7-flash → step-3.5-flash → nemotron → llama-70b. Your agent gets one response, no errors.
+Calling `model="minimax-m3"` but it returns 429? The router transparently tries
+deepseek-v4-pro → kimi-k2.6 → nemotron-3-ultra-550b → qwen3.5-397b →
+nemotron-3-super-120b → qwen3-coder-480b → qwen3-235b → deepseek-v4-flash →
+glm-5.1 → step-3.7-flash → step-3.5-flash → nemotron-super-49b →
+llama-3.1-70b.
+
+Your agent gets one response, no errors. Models in cooldown (30s after a 429)
+are skipped automatically.
 
 ## Features
 
 - **model: "auto"** — picks the best available model
+- **Sticky routing** — remembers the last successful top-tier model, reuses it on next "auto" request
 - **Tool/function calling** — full passthrough
 - **Streaming** — real SSE passthrough
 - **OpenAI format** — response identical to direct call
-- **Fallback** — automatic on 429 / timeout / error
+- **Fallback** — automatic on 429 / timeout / error (up to 10 fallbacks, 14 models total)
 - **Cooldown** — failing models rest 30s before retry
 - **Per-call timeout** — 60s ceiling per upstream call, so a stuck endpoint triggers fallback instead of hanging
 - **Graceful stream errors** — if every model fails mid-stream, the error is delivered as a valid SSE event (never a broken stream)
+- **Graceful shutdown** — closes cleanly on Ctrl+C, terminal close, or kill signal
 
 ## Requirements
 

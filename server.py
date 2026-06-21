@@ -13,6 +13,10 @@ Usage:
 import os
 import sys
 import json
+import time
+import asyncio
+import atexit
+import signal
 import logging
 import contextlib
 from typing import Optional
@@ -34,31 +38,53 @@ logger = logging.getLogger("nim-router")
 
 router: Optional[Router] = None
 
+# Sticky routing: remember which model last succeeded.
+# If it's among the top N, use it as the starting point for the next "auto"
+# request instead of always falling back to MODEL_PRIORITY[0].
+_last_successful_model: Optional[str] = None
+
 # === MODEL CONFIG ===
 
 # Priority-ordered list: trial order on fallback
 # Ranking based on public benchmarks (SWE-Bench Pro/Verified, LiveCodeBench, GPQA — June 2026)
 MODEL_PRIORITY = [
-    "kimi-k2.6",                # TIER 1 - Frontier: SWE-Bench Verified 80.2%, strong agentic
-    "deepseek-v4-pro",          # TIER 1 - Frontier: LiveCodeBench 93.5, SWE-Bench Verified 80.6%
     "minimax-m3",               # TIER 1 - Frontier: SWE-Bench Pro 59.0% (best open), GPQA 92.7%
+    "deepseek-v4-pro",          # TIER 1 - Frontier: SWE-Bench Verified 80.6%, LiveCodeBench 93.5
+    "kimi-k2.6",                # TIER 1 - Frontier: SWE-Bench Verified 80.2%, GPQA 90.5%, strong agentic
+    "nemotron-3-ultra-550b",    # TIER 1 - Frontier: LiveCodeBench 89.0%, GPQA 87.0%, 550B MoE
+    "qwen3.5-397b",             # TIER 2 - Strong: SWE-Bench Verified 76.4%, GPQA 88.4%, 397B MoE
+    "nemotron-3-super-120b",    # TIER 2 - Strong: SWE-Bench Verified ~60%, LiveCodeBench 81.2%
     "qwen3-coder-480b",         # TIER 2 - Coder: 480B MoE specialist, Claude Sonnet-level coding
     "qwen3-235b",               # TIER 2 - Strong: 235B MoE, top reasoning & multilingual
-    "deepseek-v4-flash",        # TIER 2 - Fast V4 variant, still frontier quality
+    "deepseek-v4-flash",        # TIER 3 - Fast V4 variant, still frontier quality
     "glm-5.1",                  # TIER 3 - Mid: Zhipu AI
     "step-3.7-flash",           # TIER 3 - SWE-Bench Pro 56.3%, ClawEval-1.1 #1
     "step-3.5-flash",           # TIER 3 - SWE-Bench Pro 51.3%, fast/cheap
-    "llama-nemotron-super-49b", # Backup
+    "llama-nemotron-super-49b", # Backup (v1.5)
     "llama-3.1-70b",            # Backup
 ]
 
-# Build fallback chain: kimi-k2.6 -> deepseek-v4-pro -> ... -> llama-3.1-70b
-FALLBACKS = []
-for i, model in enumerate(MODEL_PRIORITY):
-    fallbacks_list = MODEL_PRIORITY[i+1:]
-    if fallbacks_list:
-        FALLBACKS.append({model: fallbacks_list})
-FALLBACKS.append({"*": [MODEL_PRIORITY[-1]]})
+# Manual fallback with per-model cooldown (avoids LiteLLM's buggy streaming fallback)
+COOLDOWN_SECONDS = 30
+PER_MODEL_TIMEOUT = 30  # hard timeout per model (connection + initial response)
+_cooldowns = {}  # model_name -> cooldown_until_timestamp
+
+def _is_cooled_down(model_name: str) -> bool:
+    """True if the model is ready to be tried (cooldown has expired)."""
+    return time.time() >= _cooldowns.get(model_name, 0)
+
+def _set_cooldown(model_name: str, seconds: int = COOLDOWN_SECONDS):
+    """Mark a model as rate-limited for `seconds`."""
+    _cooldowns[model_name] = time.time() + seconds
+    logger.info(f"[cooldown] {model_name} cooled down for {seconds}s")
+
+def _build_fallback_chain(model_name: str) -> list:
+    """Return the priority-ordered list of models to try, starting from model_name.
+    The last model in the chain is always tried even if in cooldown."""
+    if model_name in MODEL_PRIORITY:
+        idx = MODEL_PRIORITY.index(model_name)
+        return MODEL_PRIORITY[idx:]
+    return list(MODEL_PRIORITY)  # unknown model, try full chain
 
 
 def load_env_file():
@@ -76,17 +102,20 @@ def load_env_file():
 def build_model_list(api_key: str) -> list:
     """Build model list for LiteLLM Router"""
     return [
-        {"model_name": "kimi-k2.6",                "litellm_params": {"model": "nvidia_nim/moonshotai/kimi-k2.6",                        "api_key": api_key}},
-        {"model_name": "deepseek-v4-pro",           "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-pro",                 "api_key": api_key}},
-        {"model_name": "minimax-m3",                "litellm_params": {"model": "nvidia_nim/minimaxai/minimax-m3",                        "api_key": api_key}},
-        {"model_name": "qwen3-coder-480b",          "litellm_params": {"model": "nvidia_nim/qwen/qwen3-coder-480b-a35b-instruct",         "api_key": api_key}},
-        {"model_name": "qwen3-235b",                "litellm_params": {"model": "nvidia_nim/qwen/qwen3-235b-a22b",                        "api_key": api_key}},
-        {"model_name": "deepseek-v4-flash",         "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-flash",               "api_key": api_key}},
-        {"model_name": "glm-5.1",                   "litellm_params": {"model": "nvidia_nim/z-ai/glm-5.1",                               "api_key": api_key}},
-        {"model_name": "step-3.7-flash",            "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.7-flash",                   "api_key": api_key}},
-        {"model_name": "step-3.5-flash",            "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.5-flash",                   "api_key": api_key}},
-        {"model_name": "llama-nemotron-super-49b",  "litellm_params": {"model": "nvidia_nim/nvidia/llama-3.3-nemotron-super-49b-v1",      "api_key": api_key}},
-        {"model_name": "llama-3.1-70b",             "litellm_params": {"model": "nvidia_nim/meta/llama-3.1-70b-instruct",                 "api_key": api_key}},
+        {"model_name": "minimax-m3",                 "litellm_params": {"model": "nvidia_nim/minimaxai/minimax-m3",                             "api_key": api_key}},
+        {"model_name": "deepseek-v4-pro",            "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-pro",                      "api_key": api_key}},
+        {"model_name": "kimi-k2.6",                 "litellm_params": {"model": "nvidia_nim/moonshotai/kimi-k2.6",                             "api_key": api_key}},
+        {"model_name": "nemotron-3-ultra-550b",      "litellm_params": {"model": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",                 "api_key": api_key}},
+        {"model_name": "qwen3.5-397b",               "litellm_params": {"model": "nvidia_nim/qwen/qwen3.5-397b-a17b",                           "api_key": api_key}},
+        {"model_name": "nemotron-3-super-120b",      "litellm_params": {"model": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",                 "api_key": api_key}},
+        {"model_name": "qwen3-coder-480b",           "litellm_params": {"model": "nvidia_nim/qwen/qwen3-coder-480b-a35b-instruct",              "api_key": api_key}},
+        {"model_name": "qwen3-235b",                 "litellm_params": {"model": "nvidia_nim/qwen/qwen3-235b-a22b",                             "api_key": api_key}},
+        {"model_name": "deepseek-v4-flash",          "litellm_params": {"model": "nvidia_nim/deepseek-ai/deepseek-v4-flash",                    "api_key": api_key}},
+        {"model_name": "glm-5.1",                    "litellm_params": {"model": "nvidia_nim/z-ai/glm-5.1",                                    "api_key": api_key}},
+        {"model_name": "step-3.7-flash",             "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.7-flash",                        "api_key": api_key}},
+        {"model_name": "step-3.5-flash",             "litellm_params": {"model": "nvidia_nim/stepfun-ai/step-3.5-flash",                        "api_key": api_key}},
+        {"model_name": "llama-nemotron-super-49b",   "litellm_params": {"model": "nvidia_nim/nvidia/llama-3.3-nemotron-super-49b-v1.5",        "api_key": api_key}},
+        {"model_name": "llama-3.1-70b",              "litellm_params": {"model": "nvidia_nim/meta/llama-3.1-70b-instruct",                      "api_key": api_key}},
     ]
 
 
@@ -97,15 +126,10 @@ def create_router() -> Router:
     
     r = Router(
         model_list=model_list,
-        fallbacks=FALLBACKS,
-        num_retries=2,
-        cooldown_time=30,
+        num_retries=0,              # we handle retries via manual fallback
         allowed_fails=3,
-        retry_after=2,
-        max_fallbacks=8,
-        timeout=60,                # avoid hanging forever on a stuck upstream
+        timeout=30,                 # per-model timeout (belt and suspenders with asyncio.wait_for)
         enable_pre_call_checks=True,
-        routing_strategy="simple-shuffle",
     )
     
     logger.info(f"Router created with {len(model_list)} models")
@@ -197,10 +221,16 @@ async def chat_completions(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # Map "auto" / "best-available" to the top-priority model
+    # Map "auto" / "best-available" to a model, preferring the last
+    # successful model if it's still in the top tier (sticky routing).
+    global _last_successful_model
     model_name = body.get("model", MODEL_PRIORITY[0])
     if model_name in ("auto", "best-available", "best"):
-        model_name = MODEL_PRIORITY[0]
+        if _last_successful_model is not None:
+            model_name = _last_successful_model
+            logger.info(f"[sticky] reusing last-successful model: {model_name}")
+        else:
+            model_name = MODEL_PRIORITY[0]
     
     # Extract only supported params to pass to the model
     kwargs = {k: v for k, v in body.items() if k in PASSTHROUGH_PARAMS}
@@ -214,7 +244,7 @@ async def chat_completions(request: Request):
         # failure (even before the first chunk) is delivered as a valid SSE
         # event instead of breaking the text/event-stream contract.
         return StreamingResponse(
-            _stream_passthrough(router, kwargs, model_name),
+            _stream_with_fallback(router, kwargs, model_name),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -223,25 +253,40 @@ async def chat_completions(request: Request):
             },
         )
 
-    try:
-        response = await router.acompletion(**kwargs)
-        # Non-streaming: pass response as-is (already OpenAI format)
-        return JSONResponse(content=_serialize_response(response))
+    # Manual fallback: try models in priority order, stop on first success
+    chain = _build_fallback_chain(model_name)
+    last_error = None
+    for i, model in enumerate(chain):
+        # Always try the last model even if in cooldown
+        if not _is_cooled_down(model) and i < len(chain) - 1:
+            continue
+        kwargs["model"] = model
+        try:
+            response = await asyncio.wait_for(
+                router.acompletion(**kwargs), timeout=PER_MODEL_TIMEOUT
+            )
+            _last_successful_model = model
+            return JSONResponse(content=_serialize_response(response))
+        except asyncio.TimeoutError as e:
+            last_error = e
+            logger.warning(f"[{model}] timeout ({PER_MODEL_TIMEOUT}s)")
+        except Exception as e:
+            last_error = e
+            err_type = type(e).__name__
+            logger.warning(f"[{model}] {err_type}: {str(e)[:200]}")
+            if getattr(e, 'status_code', None) == 429:
+                _set_cooldown(model)
+            # Continue to next model in chain
 
-    except Exception as e:
-        err_type = type(e).__name__
-        err_msg = str(e)[:300]
-        logger.error(f"[{model_name}] {err_type}: {err_msg}")
-        
-        # Router exhausted all fallbacks
-        content = {
-            "error": {
-                "message": f"All models failed. Last error: {err_type}",
-                "type": err_type,
-                "code": "all_models_failed",
-            }
+    err_type = type(last_error).__name__ if last_error else "Unknown"
+    logger.error(f"All models failed. Last: {err_type}")
+    return JSONResponse(status_code=503, content={
+        "error": {
+            "message": f"All models failed. Last error: {err_type}",
+            "type": err_type,
+            "code": "all_models_failed",
         }
-        return JSONResponse(status_code=503, content=content)
+    })
 
 
 @app.post("/chat/completions")
@@ -252,29 +297,79 @@ async def chat_completions_alt(request: Request):
 
 # === HELPERS ===
 
-async def _stream_passthrough(router, kwargs, model_name):
+async def _stream_with_fallback(router, kwargs, model_name):
     """
-    Pass-through SSE streaming from LiteLLM Router.
-    The router call is performed here so that errors raised before the first
-    chunk (e.g. all fallbacks exhausted) are still emitted as SSE events.
-    Each chunk is already in the correct OpenAI format, including tool_calls.
+    SSE streaming with manual fallback — NO LiteLLM fallback chain.
+    Tries models in priority order.  Once the first chunk is yielded the
+    response is locked in — mid-stream errors on the same model are emitted
+    as SSE error events (no cross-model fallback, which would corrupt output).
     """
-    try:
-        response = await router.acompletion(**kwargs)
-        async for chunk in response:
-            # LiteLLM chunks are ModelResponse (or dict) already in OpenAI format
-            chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk
-            yield f"data: {json.dumps(chunk_dict, default=str)}\n\n"
-    except Exception as e:
-        err_type = type(e).__name__
-        logger.error(f"[{model_name}] stream {err_type}: {str(e)[:300]}")
-        err = {"error": {
-            "message": f"All models failed. Last error: {err_type}",
-            "type": err_type,
-            "code": "all_models_failed",
-        }}
-        yield f"data: {json.dumps(err, default=str)}\n\n"
-    
+    global _last_successful_model
+    chain = _build_fallback_chain(model_name)
+    last_error = None
+
+    for i, model in enumerate(chain):
+        # Always try the last model even if in cooldown
+        if not _is_cooled_down(model) and i < len(chain) - 1:
+            continue
+        kwargs["model"] = model
+        try:
+            response = await asyncio.wait_for(
+                router.acompletion(**kwargs), timeout=PER_MODEL_TIMEOUT
+            )
+        except asyncio.TimeoutError as e:
+            last_error = e
+            logger.warning(f"[{model}] stream connect timeout ({PER_MODEL_TIMEOUT}s)")
+            continue
+        except Exception as e:
+            last_error = e
+            err_type = type(e).__name__
+            logger.warning(f"[{model}] stream connect {err_type}: {str(e)[:200]}")
+            if getattr(e, 'status_code', None) == 429:
+                _set_cooldown(model)
+            continue  # next model
+
+        # Got a streaming response — iterate chunks
+        started_streaming = False
+        try:
+            async for chunk in response:
+                started_streaming = True
+                chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk
+                yield f"data: {json.dumps(chunk_dict, default=str)}\n\n"
+            # Stream completed cleanly
+            _last_successful_model = model
+            yield "data: [DONE]\n\n"
+            return
+        except Exception as e:
+            err_type = type(e).__name__
+            if started_streaming:
+                # Can't fallback mid-stream — output is already partially sent
+                logger.error(f"[{model}] mid-stream {err_type}: {str(e)[:200]}")
+                err = {"error": {
+                    "message": f"Stream interrupted: {err_type}",
+                    "type": err_type,
+                    "code": "stream_interrupted",
+                }}
+                yield f"data: {json.dumps(err, default=str)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            else:
+                # Failed before any chunks — try next model
+                last_error = e
+                logger.warning(f"[{model}] stream early {err_type}: {str(e)[:200]}")
+                if getattr(e, 'status_code', None) == 429:
+                    _set_cooldown(model)
+                continue
+
+    # All models exhausted
+    err_type = type(last_error).__name__ if last_error else "Unknown"
+    logger.error(f"All models failed streaming. Last: {err_type}")
+    err = {"error": {
+        "message": f"All models failed. Last error: {err_type}",
+        "type": err_type,
+        "code": "all_models_failed",
+    }}
+    yield f"data: {json.dumps(err, default=str)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -316,7 +411,9 @@ if __name__ == "__main__":
     print(flush=True)
     print("  [V] Tool/function calling passthrough", flush=True)
     print("  [V] Real SSE streaming", flush=True)
+    print("  [V] Sticky routing (remembers last successful model)", flush=True)
     print("  [V] Auto-fallback on 429 / errors", flush=True)
+    print("  [V] Graceful shutdown (Ctrl+C / window close)", flush=True)
     print("  [V] Standard OpenAI response format", flush=True)
     print("  [V] Compatible with Claude Code, Cursor, Windsurf, Pi", flush=True)
     print(flush=True)
@@ -330,8 +427,31 @@ if __name__ == "__main__":
         print("     Create .env: NVIDIA_NIM_API_KEY=nvapi-...", flush=True)
         print(flush=True)
     
+    # === Graceful shutdown ===
+    # Ensure the server stops cleanly when the terminal is closed
+    # (Ctrl+C, closing the window, or kill signal).
+    _shutdown_flag = [False]  # mutable container to avoid global/nonlocal
+
+    def _on_shutdown(signum=None, frame=None):
+        if _shutdown_flag[0]:
+            return  # already shutting down
+        _shutdown_flag[0] = True
+        print("", flush=True)
+        logger.info(f"Received signal {signum}, shutting down...")
+        sys.exit(0)
+
+    atexit.register(lambda: print("\n  [✓] nim-smart-router stopped.", flush=True)
+                    if not _shutdown_flag[0] else None)
+
+    signal.signal(signal.SIGINT, _on_shutdown)   # Ctrl+C
+    signal.signal(signal.SIGTERM, _on_shutdown)  # kill / window close
+    if sys.platform != "win32":
+        signal.signal(signal.SIGHUP, _on_shutdown)  # terminal close (Unix)
+
     try:
         uvicorn.run(app, host="127.0.0.1", port=4000, log_level="info")
+    except KeyboardInterrupt:
+        pass  # handled by signal above
     except Exception as e:
         print(f"  [X] {e}", flush=True)
         sys.exit(1)
